@@ -153,7 +153,7 @@ Request:
 
 ```json
 {
-  "question": "Qual o óleo recomendado para o Fiat Pulse?"
+  "question": "Qual é a capacidade do tanque do Volkswagen Polo?"
 }
 ```
 
@@ -161,8 +161,8 @@ Response:
 
 ```json
 {
-  "answer": "A especificação recomendada é synthetic 0W-20 SN ou superior, com troca a cada 10.000 km ou 6 meses.",
-  "source": "fiat_pulse.md"
+  "answer": "O tanque de combustível possui capacidade de aproximadamente 49 litros, dos quais cerca de 7,5 litros correspondem à reserva.",
+  "source": "volkswagen_polo.md"
 }
 ```
 
@@ -179,9 +179,9 @@ Quando a informação não existe na base:
 
 ```json
 {
-  "documents": 4,
-  "sources": ["fiat_pulse.md", "honda_civic.md", "jeep_compass.md", "toyota_corolla.md"],
-  "total_chars": 9144,
+  "documents": 3,
+  "sources": ["volkswagen_golf.md", "volkswagen_jetta.md", "volkswagen_polo.md"],
+  "total_chars": 66809,
   "gemini_configured": true
 }
 ```
@@ -190,9 +190,9 @@ Quando a informação não existe na base:
 
 ```json
 {
-  "documents": 5,
-  "sources": ["chevrolet_onix.md", "fiat_pulse.md", "honda_civic.md", "jeep_compass.md", "toyota_corolla.md"],
-  "total_chars": 11500,
+  "documents": 3,
+  "sources": ["volkswagen_golf.md", "volkswagen_jetta.md", "volkswagen_polo.md"],
+  "total_chars": 66809,
   "gemini_configured": true
 }
 ```
@@ -227,7 +227,7 @@ Invoke-RestMethod -Uri http://127.0.0.1:8000/ -Method Get
 Invoke-RestMethod -Uri http://127.0.0.1:8000/health -Method Get
 
 # Pergunta
-$body = @{ question = "Qual o óleo recomendado para o Fiat Pulse?" } | ConvertTo-Json
+$body = @{ question = "Qual é a capacidade do tanque do Volkswagen Polo?" } | ConvertTo-Json
 Invoke-RestMethod -Uri http://127.0.0.1:8000/chat -Method Post -ContentType "application/json" -Body $body
 
 # Documentos carregados
@@ -239,9 +239,9 @@ Invoke-RestMethod -Uri http://127.0.0.1:8000/knowledge -Method Get
 ```bash
 curl http://127.0.0.1:8000/
 curl http://127.0.0.1:8000/health
-curl -X POST http://127.0.0.1:8000/chat -H "Content-Type: application/json" -d "{\"question\": \"Qual a capacidade do tanque do Jeep Compass?\"}"
-curl -X POST http://127.0.0.1:8000/chat -H "Content-Type: application/json" -d "{\"question\": \"Quando trocar o óleo do Civic?\"}"
-curl -X POST http://127.0.0.1:8000/chat -H "Content-Type: application/json" -d "{\"question\": \"Quanto é a velocidade máxima do Corolla?\"}"
+curl -X POST http://127.0.0.1:8000/chat -H "Content-Type: application/json" -d "{\"question\": \"Qual é a capacidade do tanque do Volkswagen Polo?\"}"
+curl -X POST http://127.0.0.1:8000/chat -H "Content-Type: application/json" -d "{\"question\": \"Qual é a potência do motor do Jetta?\"}"
+curl -X POST http://127.0.0.1:8000/chat -H "Content-Type: application/json" -d "{\"question\": \"Qual é a gama de motores a gasolina do Golf?\"}"
 curl http://127.0.0.1:8000/knowledge
 curl -X POST http://127.0.0.1:8000/reload
 ```
@@ -257,10 +257,9 @@ requests.get(f"{BASE}/").json()
 # {'name': 'Assistente Automotivo', 'version': '1.0.0'}
 
 perguntas = [
-    "Qual o óleo recomendado para o Fiat Pulse?",
-    "Qual a capacidade do tanque do Jeep Compass?",
-    "Quantos airbags tem o Honda Civic?",
-    "Quando sai a próxima revisão do Corolla?",
+  "Qual é a capacidade do tanque do Volkswagen Polo?",
+  "Qual é a potência do motor do Jetta?",
+  "Qual é a gama de motores a gasolina do Golf?",
 ]
 for pergunta in perguntas:
     resposta = requests.post(f"{BASE}/chat", json={"question": pergunta}).json()
@@ -284,10 +283,9 @@ ia-web-senac/
 │   └── knowledge_loader.py  # Leitura dos .md, seleção de documentos e contexto
 │
 ├── knowledge/               # Base de conhecimento (adicione seus .md aqui)
-│   ├── fiat_pulse.md
-│   ├── toyota_corolla.md
-│   ├── honda_civic.md
-│   └── jeep_compass.md
+│   ├── volkswagen_golf.md
+│   ├── volkswagen_jetta.md
+│   └── volkswagen_polo.md
 │
 ├── .env.example             # Modelo de configuração (sem a chave real)
 ├── .gitignore
@@ -312,26 +310,26 @@ ia-web-senac/
 Basta soltar um novo arquivo `.md` em `knowledge/`. **Nenhuma alteração de código é necessária.**
 
 ```markdown
-# Chevrolet Onix
+# Nome do veículo
 
 ## Especificações técnicas
 
-- Fabricante: Chevrolet
-- Tipo: Sedan compacto
+- Fabricante: Nome do fabricante
+- Tipo: Categoria do veículo
 
 ## Motor
 
-- Motorização: 1.8
-- Potência: 122 cv
+- Motorização: Descrição da motorização
+- Potência: Valor em cv ou kW
 
 ## Capacidade do tanque
 
-- Tanque de combustível: 55 litros
+- Tanque de combustível: Valor em litros
 
 ## Troca de óleo
 
-- Intervalo: 10.000 km ou 6 meses
-- Lubrificante recomendado: 0W-20 sintético
+- Intervalo: Distância ou período
+- Lubrificante recomendado: Especificação do lubrificante
 ```
 
 Depois recarregue a base:
@@ -342,7 +340,7 @@ curl -X POST http://127.0.0.1:8000/reload
 
 Recomendações para os arquivos:
 
-- O primeiro `# Título` define o nome do veículo usado na seleção de documentos (ex.: `# Fiat Pulse`).
+- O primeiro `# Título` define o nome do veículo usado na seleção de documentos (ex.: `# Volkswagen Polo`).
 - Seções sugeridas: Motor, Consumo, Capacidade do tanque, Troca de óleo, Revisões, Manutenção, Itens de segurança, Problemas comuns, Equipamentos, Informações do fabricante.
 - Prefira listas com valores numéricos e unidades claras (`km`, `meses`, `litros`, `cv`, `psi`), o que melhora a precisão das respostas.
 
