@@ -10,7 +10,7 @@ class ChatRequest(BaseModel):
 
     model_config = ConfigDict(
         json_schema_extra={
-            "example": {"question": "Qual o óleo recomendado para o Fiat Pulse?"}
+            "example": {"question": "Qual o óleo recomendado para o polo?"}
         }
     )
 

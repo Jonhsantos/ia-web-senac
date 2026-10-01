@@ -49,7 +49,7 @@ Regras obrigatórias:
    indique qual documento usou.
 6. Seja objetivo e responda sempre em português do Brasil.
 7. Formato de saída: devolva um JSON com as chaves "answer" e "source",
-   sendo "source" o nome do arquivo de origem (por exemplo "fiat_pulse.md")."""
+   sendo "source" o nome do arquivo de origem (por exemplo "volkswagen_golf.md")."""
 
 RESPONSE_SCHEMA = types.Schema(
     type=types.Type.OBJECT,
