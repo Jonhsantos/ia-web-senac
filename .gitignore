@@ -1,0 +1,23 @@
+# Variáveis de ambiente (nunca versionar)
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# Ferramentas
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+
+# IDE / Sistema
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

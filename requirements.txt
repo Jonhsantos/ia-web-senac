@@ -1,0 +1,15 @@
+# API
+fastapi>=0.115.0,<1.0.0
+
+# Servidor ASGI
+uvicorn[standard]>=0.30.0,<1.0.0
+
+# Validação e settings
+pydantic>=2.8.0,<3.0.0
+pydantic-settings>=2.4.0,<3.0.0
+
+# SDK do Google Gemini
+google-genai>=1.0.0,<2.0.0
+
+# Variáveis de ambiente
+python-dotenv>=1.0.1,<2.0.0
