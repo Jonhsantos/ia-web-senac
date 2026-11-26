@@ -73,7 +73,7 @@ Depois edite `.env` e informe sua chave:
 ```env
 GEMINI_API_KEY=sua_chave_aqui
 GEMINI_MODEL=gemini-2.5-flash
-GEMINI_TIMEOUT_SECONDS=30
+GEMINI_TIMEOUT_SECONDS=10
 GEMINI_MAX_DOCUMENTS=4
 ```
 
@@ -84,8 +84,8 @@ Variáveis disponíveis:
 | Variável | Padrão | Descrição |
 | --- | --- | --- |
 | `GEMINI_API_KEY` | vazio | Chave da API do Gemini. Obrigatória para o `/chat`. |
-| `GEMINI_MODEL` | `gemini-2.5-flash` | Modelo usado pelo serviço. |
-| `GEMINI_TIMEOUT_SECONDS` | `30` | Tempo limite de resposta do modelo. |
+| `GEMINI_MODEL` | `gemini-2.5-flash` | Modelo consultado antes da lista de fallback. |
+| `GEMINI_TIMEOUT_SECONDS` | `10` | Tempo limite por modelo, incluindo novas tentativas e esperas. Valores acima de 10 são limitados a 10 segundos. |
 | `GEMINI_MAX_DOCUMENTS` | `4` | Máximo de documentos enviados como contexto. |
 | `APP_NAME` | `Assistente Automotivo` | Nome exibido em `GET /`. |
 | `APP_VERSION` | `1.0.0` | Versão exibida em `GET /`. |
@@ -127,7 +127,8 @@ No log de inicialização você verá a base sendo carregada:
 | `GET` | `/` | Nome e versão da API. |
 | `GET` | `/health` | Verifica se a API está online. |
 | `POST` | `/chat` | Responde uma pergunta usando a base de conhecimento. |
-| `GET` | `/knowledge` | Lista os documentos carregados em memória. |
+| `POST` | `/chat/stream` | Envia a resposta em partes enquanto o modelo gera o texto. |
+| `GET` | `/knowledge` | Lista os documentos, veículos e perguntas sugeridas da base. |
 | `POST` | `/reload` | Recarrega a pasta `knowledge/` sem reiniciar. |
 
 ### `GET /`
@@ -175,6 +176,17 @@ Quando a informação não existe na base:
 }
 ```
 
+### `POST /chat/stream`
+
+Recebe o mesmo JSON de `POST /chat` e envia uma linha JSON por evento
+(`application/x-ndjson`). Eventos `status` trazem a etapa em `stage`, e eventos
+`delta` trazem o campo `text`. O evento final
+`done` traz `answer` e `source`, ou `error` traz `detail` se a geração falhar.
+
+O limite total de 10 segundos por modelo também vale durante a geração.
+O fallback ocorre antes de enviar o primeiro fragmento. Se um modelo falhar
+depois disso, o stream termina com erro e o cliente pode manter o texto recebido.
+
 ### `GET /knowledge`
 
 ```json
@@ -182,20 +194,22 @@ Quando a informação não existe na base:
   "documents": 3,
   "sources": ["volkswagen_golf.md", "volkswagen_jetta.md", "volkswagen_polo.md"],
   "total_chars": 66809,
-  "gemini_configured": true
+  "gemini_configured": true,
+  "vehicles": [
+    { "source": "volkswagen_golf.md", "make": "Volkswagen", "model": "Golf" },
+    { "source": "volkswagen_jetta.md", "make": "Volkswagen", "model": "Jetta" },
+    { "source": "volkswagen_polo.md", "make": "Volkswagen", "model": "Polo" }
+  ],
+  "suggested_questions": [
+    "Qual é a capacidade do tanque do Polo?",
+    "Qual é a potência do motor do Jetta?"
+  ]
 }
 ```
 
 ### `POST /reload`
 
-```json
-{
-  "documents": 3,
-  "sources": ["volkswagen_golf.md", "volkswagen_jetta.md", "volkswagen_polo.md"],
-  "total_chars": 66809,
-  "gemini_configured": true
-}
-```
+Retorna o mesmo formato de `GET /knowledge` após recarregar os documentos.
 
 ### Erros
 
@@ -311,6 +325,7 @@ Basta soltar um novo arquivo `.md` em `knowledge/`. **Nenhuma alteração de có
 
 ```markdown
 # Nome do veículo
+<!-- vehicle: Fabricante | Modelo | Pergunta sugerida sobre o modelo? -->
 
 ## Especificações técnicas
 
@@ -340,6 +355,7 @@ curl -X POST http://127.0.0.1:8000/reload
 
 Recomendações para os arquivos:
 
+- O comentário `vehicle` define a marca, o modelo e uma pergunta sugerida opcional para o catálogo da API. Sem o comentário, o catálogo usa o título como modelo.
 - O primeiro `# Título` define o nome do veículo usado na seleção de documentos (ex.: `# Volkswagen Polo`).
 - Seções sugeridas: Motor, Consumo, Capacidade do tanque, Troca de óleo, Revisões, Manutenção, Itens de segurança, Problemas comuns, Equipamentos, Informações do fabricante.
 - Prefira listas com valores numéricos e unidades claras (`km`, `meses`, `litros`, `cv`, `psi`), o que melhora a precisão das respostas.
@@ -353,6 +369,9 @@ Crie o `.env` na raiz do projeto com `GEMINI_API_KEY=sua_chave` e reinicie a API
 
 **`503 - Nenhum arquivo Markdown foi encontrado`**
 A pasta `knowledge/` está vazia ou `KNOWLEDGE_DIR` aponta para outro caminho. Confirme com `GET /knowledge`.
+
+**`503 - Nenhum dos modelos respondeu a tempo ou estava disponível`**
+Quando um modelo retorna HTTP 503, o backend faz até duas novas tentativas, com esperas de 1 e 2 segundos. As chamadas e as esperas compartilham o limite de 10 segundos por modelo. O serviço segue a ordem de `FALLBACK_MODELS` após timeout, HTTP 404 ou HTTP 503 persistente, sem repetir o modelo principal caso ele já esteja na lista.
 
 **A API responde a frase de fallback para tudo**
 O modelo não encontrou a informação no contexto. Confirme que a pergunta usa termos presentes no `.md` (por exemplo "óleo" em vez de "lubrificante da motorização") e confira o `source` devolvido em respostas que funcionam.
