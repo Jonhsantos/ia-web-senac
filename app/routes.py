@@ -15,6 +15,7 @@ from app.models import (
     ChatResponse,
     HealthResponse,
     KnowledgeStatusResponse,
+    VehicleResponse,
 )
 
 logger = logging.getLogger(__name__)
@@ -53,12 +54,19 @@ async def health() -> HealthResponse:
 @router.get("/knowledge", response_model=KnowledgeStatusResponse, tags=["status"])
 async def knowledge_status(request: Request) -> KnowledgeStatusResponse:
     """Lista os arquivos Markdown carregados em memória."""
-    base = _knowledge_base(request)
+    documents = _knowledge_base(request).documents
     return KnowledgeStatusResponse(
-        documents=len(base),
-        sources=base.sources,
-        total_chars=base.total_chars,
+        documents=len(documents),
+        sources=[document.source for document in documents],
+        total_chars=sum(document.size_in_chars for document in documents),
         gemini_configured=_gemini_service(request).is_configured,
+        vehicles=[
+            VehicleResponse(source=document.source, make=document.make, model=document.model)
+            for document in documents
+        ],
+        suggested_questions=sorted({
+            document.suggested_question for document in documents if document.suggested_question
+        }),
     )
 
 
@@ -75,12 +83,7 @@ async def reload_knowledge(request: Request) -> KnowledgeStatusResponse:
             detail=f"Falha ao recarregar a base de conhecimento: {exc}",
         ) from exc
 
-    return KnowledgeStatusResponse(
-        documents=len(base),
-        sources=base.sources,
-        total_chars=base.total_chars,
-        gemini_configured=_gemini_service(request).is_configured,
-    )
+    return await knowledge_status(request)
 
 
 @router.post(

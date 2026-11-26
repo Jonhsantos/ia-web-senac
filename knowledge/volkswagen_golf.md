@@ -1,4 +1,5 @@
 # Volkswagen Golf, Golf GTI e Golf R (Ano-Modelo 2026 / Edição 11.2025) - Base de Conhecimento RAG
+<!-- vehicle: Volkswagen | Golf -->
 
 ---
 
