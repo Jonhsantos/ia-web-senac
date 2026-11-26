@@ -2,13 +2,15 @@
 
 API REST de perguntas e respostas sobre veículos, construída com **FastAPI** e **Google Gemini**, usando arquivos Markdown locais como base de conhecimento.
 
-A regra principal do projeto é simples: **a IA responde apenas com o que está nos arquivos `.md` da pasta `knowledge/`**. Se a informação não estiver lá, a API devolve:
+O modelo recebe trechos dos arquivos `.md` de `knowledge/` e é instruído a responder com base neles. Quando o modelo identifica que o contexto é insuficiente, a resposta padrão é:
 
 ```text
 Não encontrei essa informação na base de conhecimento disponível.
 ```
 
 ---
+
+O cliente web está no repositório [ia-web-senac-front](https://github.com/Jonhsantos/ia-web-senac-front).
 
 ## Índice
 
@@ -29,8 +31,9 @@ Não encontrei essa informação na base de conhecimento disponível.
 
 - Carrega automaticamente todos os arquivos `.md` de `knowledge/` na inicialização e mantém o conteúdo em memória.
 - Seleciona os documentos mais relevantes para cada pergunta (por veículo citado e por termos em comum).
-- Respostas sempre baseadas no contexto enviado, com nome do arquivo de origem no campo `source`.
-- Saída estruturada em JSON validada pelo próprio modelo (schema `answer` + `source`).
+- Resposta em JSON ou streaming NDJSON, com o campo `source` para a fonte atribuída.
+- Catálogo de veículos e perguntas sugeridas extraídos dos metadados dos manuais.
+- Retry em caso de HTTP 503, fallback entre modelos e logs por pergunta.
 - Recarga da base sem reiniciar a aplicação (`POST /reload`).
 - Tratamento de erros com mensagens claras e tipagem completa (Pydantic + Type Hints).
 - Documentação interativa automática em `/docs`.
@@ -41,56 +44,52 @@ Não encontrei essa informação na base de conhecimento disponível.
 
 Requisitos: Python 3.10 ou superior.
 
-```bash
-# 1. Clone/entre na pasta do projeto
-cd ia-web-senac
+Na raiz do projeto, use o interpretador do ambiente virtual para instalar as dependências.
 
-# 2. Crie o ambiente virtual (Windows)
+**Windows (PowerShell)**
+
+```powershell
 python -m venv .venv
-.venv\Scripts\activate
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+Copy-Item .env.example .env
+```
 
-# 2. Alternativa no Linux/macOS
+**Linux ou macOS**
+
+```bash
 python3 -m venv .venv
-source .venv/bin/activate
-
-# 3. Instale as dependências
-pip install -r requirements.txt
+./.venv/bin/python -m pip install -r requirements.txt
+cp .env.example .env
 ```
 
 ---
 
 ## Configuração do `.env`
 
-A chave do Gemini **nunca** deve ir no código. Crie um arquivo `.env` na raiz do projeto:
-
-```bash
-copy .env.example .env     # Windows
-cp .env.example .env       # Linux/macOS
-```
-
-Depois edite `.env` e informe sua chave:
+Edite o `.env` criado na raiz do backend e informe sua chave. A chave deve ficar no backend.
 
 ```env
 GEMINI_API_KEY=sua_chave_aqui
-GEMINI_MODEL=gemini-2.5-flash
+GEMINI_MODEL=gemini-3.1-flash-lite
 GEMINI_TIMEOUT_SECONDS=10
 GEMINI_MAX_DOCUMENTS=4
 ```
 
-A chave é obtida gratuitamente em [Google AI Studio](https://aistudio.google.com/app/apikey).
+Você pode criar a chave no [Google AI Studio](https://aistudio.google.com/app/apikey).
 
 Variáveis disponíveis:
 
 | Variável | Padrão | Descrição |
 | --- | --- | --- |
-| `GEMINI_API_KEY` | vazio | Chave da API do Gemini. Obrigatória para o `/chat`. |
-| `GEMINI_MODEL` | `gemini-2.5-flash` | Modelo consultado antes da lista de fallback. |
+| `GEMINI_API_KEY` | vazio | Chave da API do Gemini, necessária nos dois endpoints de chat. |
+| `GEMINI_MODEL` | `gemini-2.5-flash` | Modelo consultado antes da lista de fallback. O `.env.example` sugere `gemini-3.1-flash-lite`. |
 | `GEMINI_TIMEOUT_SECONDS` | `10` | Tempo limite por modelo, incluindo novas tentativas e esperas. Valores acima de 10 são limitados a 10 segundos. |
 | `GEMINI_MAX_DOCUMENTS` | `4` | Máximo de documentos enviados como contexto. |
 | `APP_NAME` | `Assistente Automotivo` | Nome exibido em `GET /`. |
 | `APP_VERSION` | `1.0.0` | Versão exibida em `GET /`. |
 | `FALLBACK_ANSWER` | frase padrão | Resposta usada quando a base não contém a informação. |
 | `KNOWLEDGE_DIR` | `./knowledge` | Pasta dos arquivos Markdown. |
+| `CORS_ORIGINS` | `["*"]` | Lista JSON de origens aceitas. Restrinja às origens do frontend em uma implantação com acesso direto à API. |
 
 > O `.env` já está no `.gitignore`. Envie apenas o `.env.example` para o repositório.
 
@@ -98,25 +97,22 @@ Variáveis disponíveis:
 
 ## Executando a API
 
-```bash
-# com recarga automática ao editar o código
-uvicorn app.main:app --reload
-
-# ou pela própria aplicação
-python -m app.main
+```powershell
+.\.venv\Scripts\python.exe -m uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload
 ```
+
+No Linux ou macOS, use `./.venv/bin/python` no mesmo comando.
 
 A API sobe em `http://127.0.0.1:8000`.
 
 - Documentação Swagger: <http://127.0.0.1:8000/docs>
 - Documentação ReDoc: <http://127.0.0.1:8000/redoc>
 
-No log de inicialização você verá a base sendo carregada:
-
-```text
-2026-01-01 12:00:00 | INFO | app.knowledge_loader | Base de conhecimento carregada: 4 documento(s), 9144 caracteres
-2026-01-01 12:00:00 | INFO | app.main | Assistente Automotivo v1.0.0 iniciado
-```
+Mantenha esse terminal aberto para acompanhar a carga da base e os logs ao vivo.
+Use o identificador `[chat <id>]` para seguir uma pergunta da seleção de
+documentos à conclusão. O log registra o modelo, os retries, o fallback, a
+duração e a fonte atribuída. Se a porta estiver ocupada, encerre a outra
+instância ou alinhe a nova porta com `API_PROXY_TARGET` no frontend.
 
 ---
 
@@ -179,26 +175,46 @@ Quando a informação não existe na base:
 ### `POST /chat/stream`
 
 Recebe o mesmo JSON de `POST /chat` e envia uma linha JSON por evento
-(`application/x-ndjson`). Eventos `status` trazem a etapa em `stage`, e eventos
-`delta` trazem o campo `text`. O evento final
-`done` traz `answer` e `source`, ou `error` traz `detail` se a geração falhar.
+(`application/x-ndjson`).
 
-O limite total de 10 segundos por modelo também vale durante a geração.
-O fallback ocorre antes de enviar o primeiro fragmento. Se um modelo falhar
-depois disso, o stream termina com erro e o cliente pode manter o texto recebido.
+| Evento | Campos e comportamento |
+| --- | --- |
+| `status` | `stage` indica `searching`, `consulting`, `retrying` ou `fallback`. |
+| `delta` | `text` contém um fragmento da resposta. |
+| `done` | `answer` e `source` trazem a resposta final e a fonte atribuída. |
+| `error` | `detail` informa uma falha após o início do stream. O status HTTP já pode ser `200`. |
+
+```ndjson
+{"type":"status","stage":"searching"}
+{"type":"status","stage":"consulting"}
+{"type":"delta","text":"O tanque comporta "}
+{"type":"delta","text":"aproximadamente 49 litros."}
+{"type":"done","answer":"O tanque comporta aproximadamente 49 litros.","source":"volkswagen_polo.md"}
+```
+
+Cada modelo tem até 10 segundos, incluindo esperas e novas tentativas. A
+consulta pode durar mais quando passa por vários modelos. O fallback ocorre
+antes do primeiro fragmento. Se um modelo falhar depois disso, o stream
+termina com `error` e o cliente pode manter o texto recebido. Ao desconectar,
+o servidor cancela a geração.
 
 ### `GET /knowledge`
 
 ```json
 {
-  "documents": 3,
-  "sources": ["volkswagen_golf.md", "volkswagen_jetta.md", "volkswagen_polo.md"],
-  "total_chars": 66809,
+  "documents": 8,
+  "sources": ["chevrolet_onix.md", "fiat_strada.md", "honda_civic.md", "honda_fit.md", "volkswagen_golf.md", "volkswagen_jetta.md", "volkswagen_polo.md", "volkswagen_t-cross.md"],
+  "total_chars": 2730612,
   "gemini_configured": true,
   "vehicles": [
+    { "source": "chevrolet_onix.md", "make": "Chevrolet", "model": "Onix" },
+    { "source": "fiat_strada.md", "make": "Fiat", "model": "Strada" },
+    { "source": "honda_civic.md", "make": "Honda", "model": "Civic" },
+    { "source": "honda_fit.md", "make": "Honda", "model": "Fit" },
     { "source": "volkswagen_golf.md", "make": "Volkswagen", "model": "Golf" },
     { "source": "volkswagen_jetta.md", "make": "Volkswagen", "model": "Jetta" },
-    { "source": "volkswagen_polo.md", "make": "Volkswagen", "model": "Polo" }
+    { "source": "volkswagen_polo.md", "make": "Volkswagen", "model": "Polo" },
+    { "source": "volkswagen_t-cross.md", "make": "Volkswagen", "model": "T-Cross" }
   ],
   "suggested_questions": [
     "Qual é a capacidade do tanque do Polo?",
@@ -210,13 +226,15 @@ depois disso, o stream termina com erro e o cliente pode manter o texto recebido
 ### `POST /reload`
 
 Retorna o mesmo formato de `GET /knowledge` após recarregar os documentos.
+Use essa rota em ambiente local ou restrito. A versão atual não implementa
+autenticação na aplicação.
 
 ### Erros
 
 | Código | Situação |
 | --- | --- |
-| `422` | Pergunta vazia ou com menos de 3 caracteres. |
-| `503` | `GEMINI_API_KEY` não configurada, pasta `knowledge/` vazia ou falha na API do Gemini. |
+| `422` | Corpo inválido ou pergunta fora do intervalo de 3 a 1000 caracteres. |
+| `503` | Base vazia ou falha no chat convencional. Em streaming, falhas após o início do fluxo chegam em um evento `error`. |
 | `500` | Erro ao recarregar a base de conhecimento. |
 
 Formato do erro:
@@ -250,14 +268,11 @@ Invoke-RestMethod -Uri http://127.0.0.1:8000/knowledge -Method Get
 
 ### cURL
 
-```bash
-curl http://127.0.0.1:8000/
-curl http://127.0.0.1:8000/health
-curl -X POST http://127.0.0.1:8000/chat -H "Content-Type: application/json" -d "{\"question\": \"Qual é a capacidade do tanque do Volkswagen Polo?\"}"
-curl -X POST http://127.0.0.1:8000/chat -H "Content-Type: application/json" -d "{\"question\": \"Qual é a potência do motor do Jetta?\"}"
-curl -X POST http://127.0.0.1:8000/chat -H "Content-Type: application/json" -d "{\"question\": \"Qual é a gama de motores a gasolina do Golf?\"}"
-curl http://127.0.0.1:8000/knowledge
-curl -X POST http://127.0.0.1:8000/reload
+Para ver cada evento chegar sem aguardar o fim da resposta, use `-N`.
+
+```powershell
+'{"question":"Qual a capacidade do tanque do Polo?"}' |
+  curl.exe -N -H 'Content-Type: application/json' --data-binary '@-' http://127.0.0.1:8000/chat/stream
 ```
 
 ### Python
@@ -291,15 +306,14 @@ ia-web-senac/
 │   ├── __init__.py
 │   ├── main.py              # Criação do FastAPI, lifespan e CORS
 │   ├── config.py            # Configurações via .env (Pydantic Settings)
-│   ├── routes.py            # Endpoints (/, /health, /chat, /knowledge, /reload)
+│   ├── routes.py            # Endpoints HTTP, incluindo /chat/stream
 │   ├── models.py            # Schemas de entrada e saída (Pydantic)
 │   ├── gemini_service.py    # Integração com o Google Gemini + prompt e schema
+│   ├── gemini_stream.py     # Consumo do stream e separação de texto e fonte
 │   └── knowledge_loader.py  # Leitura dos .md, seleção de documentos e contexto
 │
 ├── knowledge/               # Base de conhecimento (adicione seus .md aqui)
-│   ├── volkswagen_golf.md
-│   ├── volkswagen_jetta.md
-│   └── volkswagen_polo.md
+│   └── *.md
 │
 ├── .env.example             # Modelo de configuração (sem a chave real)
 ├── .gitignore
@@ -312,10 +326,10 @@ ia-web-senac/
 ## Como a base de conhecimento é usada
 
 1. **Carga** (`knowledge_loader.load`): o `lifespan` do FastAPI lê todos os `.md` de `knowledge/` na inicialização e guarda os documentos em memória. Arquivos vazios ou ilegíveis são ignorados com aviso no log.
-2. **Seleção** (`KnowledgeBase.select`): cada documento vira um conjunto de termos normalizados (sem acentos, sem palavras muito comuns). A pontuação soma os termos em comum e ganha um bônus quando o nome do veículo citado na pergunta aparece no documento. Se a pergunta citar um veículo, só entram no contexto os documentos do mesmo nível de relevância.
+2. **Seleção** (`KnowledgeBase.select`): a pontuação considera termos normalizados em comum e nomes de veículos. Quando nenhum documento pontua, a API usa os primeiros arquivos até o limite configurado.
 3. **Contexto** (`KnowledgeBase.build_context`): os documentos selecionados são enviados ao modelo delimitados por `[DOCUMENTO N]` e `Fonte: <arquivo.md>`, com limite de 12.000 caracteres por arquivo.
-4. **Resposta** (`GeminiService.ask`): o modelo recebe instrução de responder só com base no contexto e devolver JSON (`answer`, `source`). A temperatura é baixa (`0.1`) para reduzir invenções.
-5. **Validação** (`GeminiService._parse_response`): o JSON é lido tolerando cercas de código do Markdown. Se a resposta vier vazia ou fora do formato, ou se o modelo já tiver devolvido a frase de fallback, a API substitui pela resposta padrão e zera o campo `source`.
+4. **Resposta** (`GeminiService.ask`): na rota convencional, o modelo recebe instruções para produzir JSON com `answer` e `source`. Na rota de streaming, a API separa a linha de fonte dos fragmentos NDJSON enviados ao cliente.
+5. **Fonte** (`GeminiService._parse_response`): a API normaliza o resultado e pode atribuir o primeiro arquivo selecionado quando a fonte declarada é inválida. Confira o manual antes de usar a resposta para decisões de manutenção.
 
 ---
 
@@ -370,7 +384,7 @@ Crie o `.env` na raiz do projeto com `GEMINI_API_KEY=sua_chave` e reinicie a API
 **`503 - Nenhum arquivo Markdown foi encontrado`**
 A pasta `knowledge/` está vazia ou `KNOWLEDGE_DIR` aponta para outro caminho. Confirme com `GET /knowledge`.
 
-**`503 - Nenhum dos modelos respondeu a tempo ou estava disponível`**
+**Nenhum dos modelos respondeu a tempo ou estava disponível**
 Quando um modelo retorna HTTP 503, o backend faz até duas novas tentativas, com esperas de 1 e 2 segundos. As chamadas e as esperas compartilham o limite de 10 segundos por modelo. O serviço segue a ordem de `FALLBACK_MODELS` após timeout, HTTP 404 ou HTTP 503 persistente, sem repetir o modelo principal caso ele já esteja na lista.
 
 **A API responde a frase de fallback para tudo**
