@@ -101,6 +101,7 @@ async def chat(payload: ChatRequest, request: Request) -> ChatResponse:
     base = _knowledge_base(request)
 
     if len(base) == 0:
+        logger.warning("Pergunta recusada em POST /chat: base de conhecimento vazia.")
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Nenhum arquivo Markdown foi encontrado na pasta knowledge/.",
@@ -109,7 +110,6 @@ async def chat(payload: ChatRequest, request: Request) -> ChatResponse:
     try:
         answer = await service.ask(payload.question)
     except GeminiServiceError as exc:
-        logger.exception("Falha ao gerar resposta")
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
         ) from exc

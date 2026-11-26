@@ -12,14 +12,27 @@ import json
 import logging
 import re
 from dataclasses import dataclass
+from time import monotonic
+from uuid import uuid4
 
 from google import genai
-from google.genai import types
+from google.genai import errors, types
 
-from app.config import Settings
+from app.config import MAX_GEMINI_TIMEOUT_SECONDS, Settings
 from app.knowledge_loader import KnowledgeBase, KnowledgeDocument
 
 logger = logging.getLogger(__name__)
+
+MAX_GEMINI_ATTEMPTS = 3
+FALLBACK_MODELS = (
+    "gemini-4-hydrogen",
+    "gemini-3.8-flash",
+    "gemini-3.5-flash-lite",
+    "gemini-3.1-flash-lite",
+    "gemma-4-31b-it",
+    "gemma-4-26b-a4b-it",
+    "gemini-flash-latest",
+)
 
 
 class GeminiServiceError(RuntimeError):
@@ -92,51 +105,139 @@ class GeminiService:
     # ------------------------------------------------------------------ #
     async def ask(self, question: str) -> GeminiAnswer:
         """Responde uma pergunta usando exclusivamente a base de conhecimento."""
+        chat_id = uuid4().hex[:12]
+        started_at = monotonic()
+        logger.info("[chat %s] Pergunta recebida (%d caracteres).", chat_id, len(question))
         if len(self._knowledge_base) == 0:
+            logger.warning("[chat %s] Resposta padrão: base de conhecimento vazia.", chat_id)
             return GeminiAnswer(answer=self._settings.fallback_answer, source="")
 
+        logger.info("[chat %s] Selecionando documentos da base.", chat_id)
         documents = self._knowledge_base.select(
             question, max_documents=self._settings.gemini_max_documents
         )
         context = self._knowledge_base.build_context(documents)
-        raw_text = await self._generate(question, context)
-        return self._parse_response(raw_text, documents)
+        logger.info(
+            "[chat %s] Contexto pronto (%d caracteres). Documentos: %s.",
+            chat_id,
+            len(context),
+            ", ".join(document.source for document in documents) or "nenhum",
+        )
+        try:
+            raw_text = await self._generate(question, context, chat_id)
+        except GeminiServiceError:
+            logger.error("[chat %s] Consulta concluída com falha em %.2f s.", chat_id, monotonic() - started_at)
+            raise
+        except asyncio.CancelledError:
+            logger.info("[chat %s] Consulta cancelada em %.2f s.", chat_id, monotonic() - started_at)
+            raise
 
-    async def _generate(self, question: str, context: str) -> str:
+        answer = self._parse_response(raw_text, documents)
+        if self._looks_like_fallback(answer.answer):
+            logger.info("[chat %s] Resposta padrão da base gerada em %.2f s.", chat_id, monotonic() - started_at)
+        else:
+            logger.info(
+                "[chat %s] Resposta gerada em %.2f s. Fonte: %s.",
+                chat_id,
+                monotonic() - started_at,
+                answer.source or "nenhuma",
+            )
+        return answer
+
+    async def _generate(
+        self, question: str, context: str, chat_id: str
+    ) -> str:
         """Chama o modelo de forma assíncrona e devolve o texto bruto."""
+        if not self.is_configured:
+            logger.warning("[chat %s] Chave do Gemini ausente.", chat_id)
         client = self._get_client()
         prompt = f"CONTEXTO:\n{context}\n\nPERGUNTA DO USUÁRIO:\n{question}"
 
-        config = types.GenerateContentConfig(
-            system_instruction=SYSTEM_INSTRUCTION.replace(
-                "{fallback}", self._settings.fallback_answer
-            ),
+        instruction = SYSTEM_INSTRUCTION.replace(
+            "{fallback}", self._settings.fallback_answer
+        )
+        structured_config = types.GenerateContentConfig(
+            system_instruction=instruction,
             temperature=0.1,
             response_mime_type="application/json",
             response_schema=RESPONSE_SCHEMA,
         )
+        text_config = types.GenerateContentConfig(system_instruction=instruction, temperature=0.1)
+        models = dict.fromkeys((self._settings.gemini_model, *FALLBACK_MODELS))
+        timeout = min(self._settings.gemini_timeout_seconds, MAX_GEMINI_TIMEOUT_SECONDS)
 
-        try:
-            response = await asyncio.wait_for(
-                client.aio.models.generate_content(
-                    model=self._settings.gemini_model,
+        for index, model in enumerate(models):
+            config = text_config if model.startswith("gemma-") else structured_config
+            started_at = monotonic()
+            logger.info(
+                "[chat %s] Consultando modelo %s (%s, %d/%d, limite de %g s).",
+                chat_id,
+                model,
+                "fallback" if index else "principal",
+                index + 1,
+                len(models),
+                timeout,
+            )
+            try:
+                text = await asyncio.wait_for(
+                    self._generate_with_retry(client, model, prompt, config, chat_id),
+                    timeout=timeout,
+                )
+            except asyncio.TimeoutError:
+                logger.warning("[chat %s] Modelo %s excedeu o limite de %g s.", chat_id, model, timeout)
+                continue
+            except Exception as exc:  # noqa: BLE001 - erro externo precisa ser reportado
+                code = exc.code if isinstance(exc, errors.APIError) else None
+                if code in (404, 503):
+                    logger.warning("[chat %s] Modelo %s indisponível (HTTP %d).", chat_id, model, code)
+                    continue
+                logger.error(
+                    "[chat %s] Falha ao chamar o modelo %s (%s%s).",
+                    chat_id,
+                    model,
+                    type(exc).__name__,
+                    f", HTTP {code}" if code is not None else "",
+                )
+                raise GeminiServiceError(f"Falha ao consultar o Gemini: {exc}") from exc
+
+            if text and (config is structured_config or self._extract_json(text).get("answer")):
+                logger.info("[chat %s] Modelo %s respondeu em %.2f s.", chat_id, model, monotonic() - started_at)
+                return text
+            logger.warning("[chat %s] Modelo %s devolveu uma resposta vazia ou inválida.", chat_id, model)
+
+        logger.error("[chat %s] Modelos da cadeia de fallback esgotados.", chat_id)
+        raise GeminiServiceError(
+            "Nenhum dos modelos respondeu a tempo ou estava disponível. Tente novamente em instantes."
+        )
+
+    async def _generate_with_retry(
+        self, client: genai.Client, model: str, prompt: str,
+        config: types.GenerateContentConfig, chat_id: str,
+    ) -> str:
+        """Repete a chamada em caso de indisponibilidade temporária do Gemini."""
+        attempt = 1
+        while True:
+            try:
+                response = await client.aio.models.generate_content(
+                    model=model,
                     contents=prompt,
                     config=config,
-                ),
-                timeout=self._settings.gemini_timeout_seconds,
-            )
-        except asyncio.TimeoutError as exc:
-            raise GeminiServiceError(
-                "Tempo limite excedido ao consultar o Gemini."
-            ) from exc
-        except Exception as exc:  # noqa: BLE001 - erro externo precisa ser reportado
-            logger.exception("Falha ao chamar o Gemini")
-            raise GeminiServiceError(f"Falha ao consultar o Gemini: {exc}") from exc
-
-        text = (getattr(response, "text", None) or "").strip()
-        if not text:
-            raise GeminiServiceError("O Gemini devolveu uma resposta vazia.")
-        return text
+                )
+                return (response.text or "").strip()
+            except errors.APIError as exc:
+                if exc.code != 503 or attempt == MAX_GEMINI_ATTEMPTS:
+                    raise
+                delay = 2 ** (attempt - 1)
+                attempt += 1
+                logger.warning(
+                    "[chat %s] Modelo %s retornou 503. Tentativa %d de %d em %d s.",
+                    chat_id,
+                    model,
+                    attempt,
+                    MAX_GEMINI_ATTEMPTS,
+                    delay,
+                )
+                await asyncio.sleep(delay)
 
     # ------------------------------------------------------------------ #
     # Interpretação da resposta
