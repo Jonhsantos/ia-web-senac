@@ -2,9 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
+import json
 import logging
+from collections.abc import AsyncIterator
+from dataclasses import asdict
 
 from fastapi import APIRouter, HTTPException, Request, status
+from fastapi.responses import StreamingResponse
 
 from app.config import Settings, get_settings
 from app.gemini_service import GeminiService, GeminiServiceError
@@ -115,3 +120,54 @@ async def chat(payload: ChatRequest, request: Request) -> ChatResponse:
         ) from exc
 
     return ChatResponse(answer=answer.answer, source=answer.source)
+
+
+@router.post(
+    "/chat/stream",
+    tags=["chat"],
+    response_class=StreamingResponse,
+    responses={200: {"content": {"application/x-ndjson": {}}}},
+)
+async def chat_stream(payload: ChatRequest, request: Request) -> StreamingResponse:
+    """Envia fragmentos de texto e, no fim, a resposta normalizada ou um erro."""
+    if len(_knowledge_base(request)) == 0:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Nenhum arquivo Markdown foi encontrado na pasta knowledge/.",
+        )
+    service = _gemini_service(request)
+
+    async def events() -> AsyncIterator[str]:
+        queue: asyncio.Queue[dict] = asyncio.Queue()
+
+        async def produce() -> None:
+            try:
+                answer = await service.ask(
+                    payload.question,
+                    on_delta=lambda text: queue.put_nowait({"type": "delta", "text": text}),
+                    on_status=lambda stage: queue.put_nowait({"type": "status", "stage": stage}),
+                )
+            except GeminiServiceError as exc:
+                queue.put_nowait({"type": "error", "detail": str(exc)})
+            except Exception:
+                logger.exception("Falha inesperada no streaming do chat")
+                queue.put_nowait({"type": "error", "detail": "Não foi possível concluir a resposta."})
+            else:
+                queue.put_nowait({"type": "done", **asdict(answer)})
+
+        producer = asyncio.create_task(produce())
+        try:
+            while True:
+                event = await queue.get()
+                yield json.dumps(event, ensure_ascii=False) + "\n"
+                if event["type"] in ("done", "error"):
+                    return
+        finally:
+            producer.cancel()
+            await asyncio.gather(producer, return_exceptions=True)
+
+    return StreamingResponse(
+        events(),
+        media_type="application/x-ndjson",
+        headers={"Cache-Control": "no-cache, no-transform", "X-Accel-Buffering": "no"},
+    )

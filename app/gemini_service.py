@@ -11,6 +11,7 @@ import asyncio
 import json
 import logging
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
 from time import monotonic
 from uuid import uuid4
@@ -19,6 +20,7 @@ from google import genai
 from google.genai import errors, types
 
 from app.config import MAX_GEMINI_TIMEOUT_SECONDS, Settings
+from app.gemini_stream import STREAM_FORMAT, StreamOutput
 from app.knowledge_loader import KnowledgeBase, KnowledgeDocument
 
 logger = logging.getLogger(__name__)
@@ -103,7 +105,11 @@ class GeminiService:
     # ------------------------------------------------------------------ #
     # Consulta à base de conhecimento
     # ------------------------------------------------------------------ #
-    async def ask(self, question: str) -> GeminiAnswer:
+    async def ask(
+        self, question: str, *,
+        on_delta: Callable[[str], None] | None = None,
+        on_status: Callable[[str], None] | None = None,
+    ) -> GeminiAnswer:
         """Responde uma pergunta usando exclusivamente a base de conhecimento."""
         chat_id = uuid4().hex[:12]
         started_at = monotonic()
@@ -113,6 +119,8 @@ class GeminiService:
             return GeminiAnswer(answer=self._settings.fallback_answer, source="")
 
         logger.info("[chat %s] Selecionando documentos da base.", chat_id)
+        if on_status is not None:
+            on_status("searching")
         documents = self._knowledge_base.select(
             question, max_documents=self._settings.gemini_max_documents
         )
@@ -124,7 +132,8 @@ class GeminiService:
             ", ".join(document.source for document in documents) or "nenhum",
         )
         try:
-            raw_text = await self._generate(question, context, chat_id)
+            stream = StreamOutput(on_delta, on_status) if on_delta is not None else None
+            raw_text = await self._generate(question, context, chat_id, stream)
         except GeminiServiceError:
             logger.error("[chat %s] Consulta concluída com falha em %.2f s.", chat_id, monotonic() - started_at)
             raise
@@ -145,7 +154,7 @@ class GeminiService:
         return answer
 
     async def _generate(
-        self, question: str, context: str, chat_id: str
+        self, question: str, context: str, chat_id: str, stream: StreamOutput | None = None
     ) -> str:
         """Chama o modelo de forma assíncrona e devolve o texto bruto."""
         if not self.is_configured:
@@ -156,6 +165,8 @@ class GeminiService:
         instruction = SYSTEM_INSTRUCTION.replace(
             "{fallback}", self._settings.fallback_answer
         )
+        if stream is not None:
+            instruction = instruction.partition("\n7. ")[0] + "\n" + STREAM_FORMAT
         structured_config = types.GenerateContentConfig(
             system_instruction=instruction,
             temperature=0.1,
@@ -167,7 +178,9 @@ class GeminiService:
         timeout = min(self._settings.gemini_timeout_seconds, MAX_GEMINI_TIMEOUT_SECONDS)
 
         for index, model in enumerate(models):
-            config = text_config if model.startswith("gemma-") else structured_config
+            config = text_config if stream is not None or model.startswith("gemma-") else structured_config
+            if stream is not None and stream.on_status is not None:
+                stream.on_status("fallback" if index else "consulting")
             started_at = monotonic()
             logger.info(
                 "[chat %s] Consultando modelo %s (%s, %d/%d, limite de %g s).",
@@ -180,14 +193,19 @@ class GeminiService:
             )
             try:
                 text = await asyncio.wait_for(
-                    self._generate_with_retry(client, model, prompt, config, chat_id),
+                    self._generate_with_retry(client, model, prompt, config, chat_id, stream),
                     timeout=timeout,
                 )
-            except asyncio.TimeoutError:
+            except asyncio.TimeoutError as exc:
                 logger.warning("[chat %s] Modelo %s excedeu o limite de %g s.", chat_id, model, timeout)
+                if stream is not None and stream.started:
+                    raise GeminiServiceError("A resposta foi interrompida pelo limite de tempo.") from exc
                 continue
             except Exception as exc:  # noqa: BLE001 - erro externo precisa ser reportado
                 code = exc.code if isinstance(exc, errors.APIError) else None
+                if stream is not None and stream.started:
+                    logger.warning("[chat %s] Stream do modelo %s interrompido (%s).", chat_id, model, type(exc).__name__)
+                    raise GeminiServiceError("A resposta foi interrompida. Tente novamente.") from exc
                 if code in (404, 503):
                     logger.warning("[chat %s] Modelo %s indisponível (HTTP %d).", chat_id, model, code)
                     continue
@@ -198,6 +216,8 @@ class GeminiService:
                     type(exc).__name__,
                     f", HTTP {code}" if code is not None else "",
                 )
+                if stream is not None:
+                    raise GeminiServiceError("Não foi possível consultar o Gemini. Tente novamente.") from exc
                 raise GeminiServiceError(f"Falha ao consultar o Gemini: {exc}") from exc
 
             if text and (config is structured_config or self._extract_json(text).get("answer")):
@@ -212,12 +232,17 @@ class GeminiService:
 
     async def _generate_with_retry(
         self, client: genai.Client, model: str, prompt: str,
-        config: types.GenerateContentConfig, chat_id: str,
+        config: types.GenerateContentConfig, chat_id: str, stream: StreamOutput | None,
     ) -> str:
         """Repete a chamada em caso de indisponibilidade temporária do Gemini."""
         attempt = 1
         while True:
             try:
+                if stream is not None:
+                    chunks = await client.aio.models.generate_content_stream(
+                        model=model, contents=prompt, config=config
+                    )
+                    return await stream.consume(chunks)
                 response = await client.aio.models.generate_content(
                     model=model,
                     contents=prompt,
@@ -225,10 +250,12 @@ class GeminiService:
                 )
                 return (response.text or "").strip()
             except errors.APIError as exc:
-                if exc.code != 503 or attempt == MAX_GEMINI_ATTEMPTS:
+                if exc.code != 503 or attempt == MAX_GEMINI_ATTEMPTS or (stream and stream.started):
                     raise
                 delay = 2 ** (attempt - 1)
                 attempt += 1
+                if stream is not None and stream.on_status is not None:
+                    stream.on_status("retrying")
                 logger.warning(
                     "[chat %s] Modelo %s retornou 503. Tentativa %d de %d em %d s.",
                     chat_id,
