@@ -23,6 +23,10 @@ MAX_CHARS_PER_DOCUMENT = 12_000
 # Bônus de relevância aplicado quando a pergunta cita o nome do veículo.
 VEHICLE_MATCH_BONUS = 5
 
+_CATALOG_METADATA = re.compile(
+    r"(?m)^<!-- vehicle: ([^|\n]+) \| ([^|\n]+)(?: \| ([^\n]+?))? -->\n?"
+)
+
 # Palavras muito comuns em português, removidas antes do cálculo de relevância.
 _STOP_WORDS: frozenset[str] = frozenset(
     """
@@ -53,6 +57,9 @@ class KnowledgeDocument:
 
     terms: frozenset[str] = field(default_factory=frozenset)
     """Termos normalizados usados para ranquear o documento por relevância."""
+    make: str = ""
+    model: str = ""
+    suggested_question: str = ""
 
     @property
     def size_in_chars(self) -> int:
@@ -140,7 +147,13 @@ class KnowledgeBase:
             logger.warning("Não foi possível ler %s: %s", path.name, exc)
             return None
 
-        cleaned = content.strip()
+        metadata = _CATALOG_METADATA.search(content)
+        make, model, suggestion = (
+            tuple((value or "").strip() for value in metadata.groups())
+            if metadata
+            else ("", "", "")
+        )
+        cleaned = _CATALOG_METADATA.sub("", content, count=1).strip()
         if not cleaned:
             logger.warning("Arquivo vazio ignorado: %s", path.name)
             return None
@@ -152,6 +165,9 @@ class KnowledgeBase:
             content=cleaned,
             vehicle=self._normalize(self._extract_vehicle(title)),
             terms=self._extract_terms(f"{title}\n{cleaned}"),
+            make=make,
+            model=model or title,
+            suggested_question=suggestion,
         )
 
     # ------------------------------------------------------------------ #

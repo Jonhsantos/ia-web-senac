@@ -10,6 +10,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Raiz do projeto (pasta que contém ``app/`` e ``knowledge/``).
 BASE_DIR: Path = Path(__file__).resolve().parent.parent
+MAX_GEMINI_TIMEOUT_SECONDS = 10.0
 
 
 class Settings(BaseSettings):
@@ -31,7 +32,7 @@ class Settings(BaseSettings):
         description="Chave da API do Google Gemini (nunca versionar no código).",
     )
     gemini_model: str = Field(default="gemini-2.5-flash")
-    gemini_timeout_seconds: float = Field(default=30.0)
+    gemini_timeout_seconds: float = Field(default=MAX_GEMINI_TIMEOUT_SECONDS, gt=0)
     gemini_max_documents: int = Field(
         default=4,
         description="Quantidade máxima de documentos enviados como contexto por pergunta.",

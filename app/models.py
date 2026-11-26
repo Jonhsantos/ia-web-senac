@@ -53,6 +53,12 @@ class HealthResponse(BaseModel):
     status: str = "online"
 
 
+class VehicleResponse(BaseModel):
+    source: str
+    make: str
+    model: str
+
+
 class KnowledgeStatusResponse(BaseModel):
     """Resposta de ``GET /knowledge`` e ``POST /reload``."""
 
@@ -60,6 +66,8 @@ class KnowledgeStatusResponse(BaseModel):
     sources: list[str] = Field(..., description="Nomes dos arquivos carregados.")
     total_chars: int = Field(..., description="Total de caracteres carregados em memória.")
     gemini_configured: bool = Field(..., description="Indica se a GEMINI_API_KEY está definida.")
+    vehicles: list[VehicleResponse]
+    suggested_questions: list[str]
 
 
 class ErrorResponse(BaseModel):
